@@ -15,8 +15,8 @@ This image has been converted to TIFF from RJPG of a DJI drone.
 
 ## Requirements
 Ensure the following Python libraries are installed:
-```sh
+```
 pip install rasterio numpy matplotlib tk exiftool
-
+'''
 ## Author
 Develop by Kunnop
