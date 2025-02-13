@@ -1,6 +1,4 @@
-# Save the README content as a Markdown file for user download
-
-readme_content = """# Thermal Image Viewer
+# Thermal Image Viewer
 
 ## Overview
 This image has been converted to TIFF from RJPG of a DJI drone.
