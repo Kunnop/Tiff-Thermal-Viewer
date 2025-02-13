@@ -1,7 +1,7 @@
 # Thermal Image Viewer
 
 ## Overview
-This image has been converted to TIFF from RJPG of a DJI drone.
+For image that has been converted to TIFF from RJPG of a DJI drone.
 **Thermal Image Viewer** is a Python application that allows users to visualize **thermal TIFF images**. The application provides real-time temperature readings at selected pixels, enables **zooming and panning**, and includes adjustable **color maps** and **temperature scaling**. The program also extracts **GPS position** from image metadata using `ExifTool`.
 
 ## Features
