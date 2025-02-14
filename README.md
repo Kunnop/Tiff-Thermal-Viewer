@@ -16,7 +16,7 @@ For image that has been converted to TIFF from RJPG of a DJI drone.
 ## Requirements
 Ensure the following Python libraries are installed:
 ```
-pip install rasterio numpy matplotlib tk exiftool
+pip install rasterio numpy matplotlib tk exiftool ttkbootstrap
 ```
 ## Author
 Develop by Kunnop
