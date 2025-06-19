@@ -11,6 +11,10 @@ import re, subprocess
 import ttkbootstrap as ttkb
 import tkinter.messagebox
 import os
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import sys
+
+import Gen_reportV2
 
 # Global variables for annotations
 annotations = []
@@ -27,18 +31,74 @@ canvas_widget = None
 point_annotation_mode = False
 point_annotations = []
 
+# Replace single undo tracking with undo stack
+undo_stack = []  # List to store all actions for undo
+
 # At the top, define your 4:3 box size (in pixels)
 BOX_WIDTH = 800
 BOX_HEIGHT = 600
 
 # Add at the top of your file:
 colorbar = None
+export_path = None  # Add this line to store export path
 
-#BY KUNNOP KOETYAEM 05/20/2025
+# Style configuration variables
+TEXT_SIZE_SMALL = 8  # For temperature values
+TEXT_SIZE_MEDIUM = 9  # For annotation names
+CIRCLE_RADIUS =  2 # For point markers
+LINE_LENGTH = 7  # For crosshair lines
+LINE_GAP = 5  # For crosshair gap
+LINE_THICKNESS = 2  # For all lines
+BOX_LINE_THICKNESS = 2  # For box borders
+STROKE_THICKNESS = 3  # For text and shape outlines
+
+# Add at the top with other global variables
+defect_types = [
+    "Module open circuit",
+    "String open circuit",
+    "Module short circuit",
+    "Modules crack",
+    "Substring in short circuit",
+    "Bypass Diode",
+    "Bypass Diode Multi",
+    "Hot spot",
+    "Hot spot multi",
+    "Dirty or Shade",
+    "Module broken front (thin film)",
+    "Transfer resistance or Delamination (thin film)",
+    "Transfer resistance or Delamination (Si)",
+    "Hot module junction box (line Si and thin film)",
+    "No Abnormality"
+]
+
+def test_pdf(thermal_path: str, thermal_img_path: str, project_name: str, project_owner: str, location_text: str, category_text: str, 
+             coord_text: str, image_taken: str, temp_min: float, temp_avg: float, temp_max: float, radiation: float) -> None:
+
+    print("--- PDF Report Data ---")
+    print(f"  Project Name:     {project_name}")
+    print(f"  Project Owner:    {project_owner}")
+    print(f"  Location:         {location_text}")
+    print(f"  Category:         {category_text}")
+    print(f"  Coordinates:      {coord_text}")
+    print(f"  Image Taken:      {image_taken}")
+    print("\n  --- Image Paths ---")
+    print(f"  Thermal OG Path (IR): {thermal_path}")
+    print(f"  Thermal image Path (IR): {thermal_img_path}")
+    print("\n  --- Temperature Data ---")
+    print(f"  Min Temperature:  {temp_min}°C")
+    print(f"  Avg Temperature:  {temp_avg}°C")
+    print(f"  Max Temperature:  {temp_max}°C")
+    print("\n  --- Environmental Data ---")
+    print(f"  Solar Radiation:  {radiation} W/m²")
+    print("-----------------------")
+
+#BY KUNNOP KOETYAEM 06/18/2025
 def open_file():
+    global file_path
     file_path = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif;*.tiff")])
     if file_path:
         file_label.config(text=f"📁 File: {file_path.split('/')[-1]}")  # Show only file name
+        print(file_path)
         process_thermal_image(file_path)
 
 def convert_to_decimal_degrees(gps_str):
@@ -172,8 +232,10 @@ def update_image():
         ax.set_aspect('equal')
         ax.axis("off")
 
-        # Create colorbar and keep reference
-        colorbar = fig.colorbar(img_display, ax=ax, fraction=0.05, pad=0.02, label='Temperature (°C)')
+        # Create colorbar with height matching the image
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        colorbar = fig.colorbar(img_display, cax=cax)
         colorbar.ax.tick_params(labelsize=10)
 
         canvas = FigureCanvasTkAgg(fig, master=frame)
@@ -209,10 +271,10 @@ def on_mouse_press(event):
         is_drawing = True
         rect_start = (event.xdata, event.ydata)
         # Create white rectangle with black edge
-        current_rect = Rectangle(rect_start, 0, 0, fill=False, edgecolor='white', linewidth=1)
-        current_rect.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        current_rect = Rectangle(rect_start, 0, 0, fill=False, edgecolor='white', linewidth=BOX_LINE_THICKNESS)
+        current_rect.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         ax.add_patch(current_rect)
-        canvas.draw()
+        canvas.draw_idle()
     # Left click for temperature display and panning
     elif event.button == 1 and not point_annotation_mode:
         #if event.xdata is not None and event.ydata is not None:
@@ -236,18 +298,47 @@ def on_mouse_motion(event):
             height = event.ydata - rect_start[1]
             current_rect.set_width(width)
             current_rect.set_height(height)
-            canvas.draw()
+            canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
     # Handle panning (left-click drag)
     elif is_panning and hasattr(canvas_widget, 'old_coords') and event.x is not None and event.y is not None:
         dx = event.x - canvas_widget.old_coords[0]
         dy = event.y - canvas_widget.old_coords[1]
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
-        ax.set_xlim([x - dx for x in xlim])
-        # Invert vertical panning direction
-        ax.set_ylim([y + dy for y in ylim])  # Changed minus to plus to invert
+        
+        # Calculate new limits
+        new_xlim = [x - dx for x in xlim]
+        new_ylim = [y + dy for y in ylim]  # Changed minus to plus to invert
+        
+        # Clamp the new limits to image boundaries
+        width = thermal_data.shape[1]
+        height = thermal_data.shape[0]
+        
+        # Calculate the visible width and height
+        visible_width = new_xlim[1] - new_xlim[0]
+        visible_height = abs(new_ylim[1] - new_ylim[0])  # Use abs() since y-axis is inverted
+        
+        # Clamp x limits
+        if new_xlim[0] < 0:
+            new_xlim[0] = 0
+            new_xlim[1] = visible_width
+        elif new_xlim[1] > width:
+            new_xlim[1] = width
+            new_xlim[0] = width - visible_width
+            
+        # Clamp y limits (note: y-axis is inverted, so ylim[0] > ylim[1])
+        if new_ylim[0] > height:  # Top edge (smaller y value)
+            new_ylim[0] = height
+            new_ylim[1] = height - visible_height
+        elif new_ylim[1] < 0:  # Bottom edge (larger y value)
+            new_ylim[1] = 0
+            new_ylim[0] = visible_height
+        
+        # Apply the clamped limits
+        ax.set_xlim(new_xlim)
+        ax.set_ylim(new_ylim)
         canvas_widget.old_coords = event.x, event.y
-        canvas.draw()
+        canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
     
     # Always show temperature on hover
     if event.xdata is not None and event.ydata is not None:
@@ -304,7 +395,7 @@ def find_box_average_temp(x_start, y_start, width, height):
     return avg_temp
 
 def on_mouse_release(event):
-    global is_drawing, current_rect, rect_start, is_panning
+    global is_drawing, current_rect, rect_start, is_panning, undo_stack
     
     # Handle left-click release for panning
     if event.button == 1:
@@ -320,7 +411,7 @@ def on_mouse_release(event):
     if event.inaxes != ax:  # Ignore releases outside the axes
         if current_rect:
             current_rect.remove()
-            canvas.draw()
+            canvas.draw_idle()
         is_drawing = False
         current_rect = None
         rect_start = None
@@ -328,66 +419,116 @@ def on_mouse_release(event):
         
     is_drawing = False
     if current_rect and rect_start:
-        # Get annotation name from user using custom dialog
-        name = get_annotation_name("Box Name", "Enter a name for this region:")
-        if name is None or name.strip() == "":  # User cancelled or empty name
-            current_rect.remove()
-            canvas.draw()
-            return
+        try:
+            # Validate coordinates
+            if event.xdata is None or event.ydata is None:
+                raise ValueError("Invalid coordinates: mouse released outside plot area")
+                
+            # Get annotation name from user using custom dialog
+            name = get_annotation_name("Box Name", "Enter a name for this region:")
+            if name is None or name.strip() == "":  # User cancelled or empty name
+                current_rect.remove()
+                canvas.draw_idle()
+                return
+                
+            # Calculate width and height with validation
+            width = event.xdata - rect_start[0]
+            height = event.ydata - rect_start[1]
+                
+            # Validate box dimensions
+            if abs(width) < 1 or abs(height) < 1:
+                raise ValueError("Box is too small")
+                
+            # Ensure width and height are positive
+            if width < 0:
+                rect_start = (event.xdata, rect_start[1])
+                width = abs(width)
+            if height < 0:
+                rect_start = (rect_start[0], event.ydata)
+                height = abs(height)
             
-        width = event.xdata - rect_start[0]
-        height = event.ydata - rect_start[1]
-        
-        # Find min and max temperatures in the region
-        min_point, max_point = find_min_max_temps(rect_start[0], rect_start[1], width, height)
-        
-        # Calculate average temperature
-        avg_temp = find_box_average_temp(rect_start[0], rect_start[1], width, height)
-        
-        if min_point and max_point:
-            # Add circles for min and max temperatures with black borders
-            min_circle = plt.Circle((min_point[0], min_point[1]), radius=2, color='blue', fill=True)
-            min_circle.set_path_effects([plt_effects.withStroke(linewidth=1.5, foreground='black')])
-            max_circle = plt.Circle((max_point[0], max_point[1]), radius=2, color='red', fill=True)
-            max_circle.set_path_effects([plt_effects.withStroke(linewidth=1.5, foreground='black')])
-            ax.add_patch(min_circle)
-            ax.add_patch(max_circle)
+            # Find min and max temperatures in the region
+            min_point, max_point = find_min_max_temps(rect_start[0], rect_start[1], width, height)
             
-            # Add temperature labels for min and max points with white text and black outline
-            min_text = ax.text(min_point[0], min_point[1] - 10, f'Min: {min_point[2]:.1f}°C', 
-                   color='white', fontsize=7, ha='center', fontweight='bold')
-            min_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+            # Calculate average temperature
+            avg_temp = find_box_average_temp(rect_start[0], rect_start[1], width, height)
             
-            max_text = ax.text(max_point[0], max_point[1] - 10, f'Max: {max_point[2]:.1f}°C', 
-                   color='white', fontsize=7, ha='center', fontweight='bold')
-            max_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-        
-        # Store annotation data
-        annotation = {
-            'name': name,
-            'rect': current_rect,
-            'coords': (rect_start[0], rect_start[1], width, height),
-            'min_circle': min_circle if min_point else None,
-            'max_circle': max_circle if max_point else None,
-            'min_temp': min_point[2] if min_point else None,
-            'max_temp': max_point[2] if max_point else None,
-            'avg_temp': avg_temp
-        }
-        annotations.append(annotation)
-        
-        # Add name label
-        name_text = ax.text(rect_start[0], rect_start[1] - 22, name.upper(),
-                     color='white', fontsize=8, ha='center', fontweight='bold')
-        name_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-        
-        # Add average temperature label
-        if avg_temp is not None:
-            temp_text = ax.text(rect_start[0], rect_start[1] - 15, f'Avg: {avg_temp:.1f}°C',
-                         color='white', fontsize=7, ha='center', fontweight='bold')
-            temp_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-        
-        canvas.draw()
-        root.after(100, update_temperature_table)  # Update table after a short delay
+            if min_point and max_point:
+                # Add circles for min and max temperatures with black borders
+                min_circle = plt.Circle((min_point[0], min_point[1]), radius=CIRCLE_RADIUS, color='blue', fill=True)
+                min_circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+                max_circle = plt.Circle((max_point[0], max_point[1]), radius=CIRCLE_RADIUS, color='red', fill=True)
+                max_circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+                ax.add_patch(min_circle)
+                ax.add_patch(max_circle)
+            
+            # Store annotation data
+            annotation = {
+                'name': name,
+                'rect': current_rect,
+                'coords': (rect_start[0], rect_start[1], width, height),
+                'min_circle': min_circle if min_point else None,
+                'max_circle': max_circle if max_point else None,
+                'min_temp': min_point[2] if min_point else None,
+                'max_temp': max_point[2] if max_point else None,
+                'avg_temp': avg_temp
+            }
+            annotations.append(annotation)
+            
+            # Print box annotation details
+            current_file = file_label.cget("text").split(": ")[-1]
+            print(f"\nBox Annotation Details:")
+            print(f"Image: {file_path}")
+            print(f"\nMin Temp: {min_point[2]:.2f} °C")
+            print(f"Avg Temp: {avg_temp:.2f} °C")
+            print(f"Max Temp: {max_point[2]:.2f} °C")
+            print("-" * 40)
+            
+            # Add to undo stack
+            undo_stack.append({
+                'type': 'box',
+                'annotation': annotation
+            })
+            
+            # --- Place box labels to the right side of the box ---
+            label_x = rect_start[0] + width + 10  # 10 pixels to the right of the box
+            label_y = rect_start[1]
+            label_spacing = 13  # vertical space between labels
+            
+            # Add name label at the top
+            name_text = ax.text(label_x, label_y, name.upper(),
+                         color='white', fontsize=TEXT_SIZE_MEDIUM, ha='left', fontweight='bold')
+            name_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            
+            # Add min temperature label
+            if min_point:
+                min_side_text = ax.text(label_x, label_y + label_spacing, f'Min: {min_point[2]:.1f}°C',
+                             color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                min_side_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            
+            # Add average temperature label
+            if avg_temp is not None:
+                avg_text = ax.text(label_x, label_y + 2*label_spacing, f'Avg: {avg_temp:.1f}°C',
+                             color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                avg_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            
+            # Add max temperature label
+            if max_point:
+                max_side_text = ax.text(label_x, label_y + 3*label_spacing, f'Max: {max_point[2]:.1f}°C',
+                             color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                max_side_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            
+            canvas.draw_idle()
+            root.after(100, update_temperature_table)  # Update table after a short delay
+            
+        except Exception as e:
+            print(f"Error creating annotation: {e}")
+            # Clean up if something goes wrong
+            if current_rect:
+                current_rect.remove()
+            canvas.draw_idle()
+            # Show error message to user
+            tk.messagebox.showerror("Error", f"Failed to create annotation: {str(e)}")
     
     current_rect = None
     rect_start = None
@@ -396,9 +537,9 @@ def toggle_annotation_mode():
     global annotation_mode
     annotation_mode = not annotation_mode
     if annotation_mode:
-        btn_annotate.config(text="✏️ Drawing Mode (ON)")
+        btn_annotate.config(text="✏️ Drawing Mode\n(ON)")
     else:
-        btn_annotate.config(text="✏️ Drawing Mode (OFF)")
+        btn_annotate.config(text="✏️ Drawing Mode\n(OFF)")
 
 scroll_after_id = None
 def on_scroll(event):
@@ -410,7 +551,7 @@ def on_scroll(event):
         ax.set_xlim([x * scale for x in xlim])
         ax.set_ylim([y * scale for y in ylim])
         clamp_view()
-        canvas.draw()
+        canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
     if scroll_after_id:
         canvas_widget.after_cancel(scroll_after_id)
     scroll_after_id = canvas_widget.after(50, zoom)
@@ -605,31 +746,40 @@ def clear_annotations():
     global annotations
     # Remove all box annotation rectangles, circles, and text from the plot
     for annotation in annotations:
-        # Remove rectangle
-        if annotation['rect']:
-            annotation['rect'].remove()
-        # Remove min/max circles if they exist
-        if annotation.get('min_circle'):
-            annotation['min_circle'].remove()
-        if annotation.get('max_circle'):
-            annotation['max_circle'].remove()
+        try:
+            # Remove rectangle
+            if annotation.get('rect'):
+                annotation['rect'].remove()
+            # Remove min/max circles if they exist
+            if annotation.get('min_circle'):
+                annotation['min_circle'].remove()
+            if annotation.get('max_circle'):
+                annotation['max_circle'].remove()
+        except Exception as e:
+            print(f"Error removing annotation elements: {e}")
     
     # Clear all text annotations that belong to boxes
-    texts_to_remove = []
-    for text in ax.texts:
-        # Check if the text is part of a box annotation
-        for annotation in annotations:
-            if text.get_text().startswith(annotation['name'].upper()) or text.get_text().startswith('Min:') or text.get_text().startswith('Max:') or text.get_text().startswith('Avg:'):
-                texts_to_remove.append(text)
-                break
-    
-    # Remove the collected texts
-    for text in texts_to_remove:
-        text.remove()
+    try:
+        texts_to_remove = []
+        for text in ax.texts:
+            # Check if the text is part of a box annotation
+            for annotation in annotations:
+                if (text.get_text().startswith(annotation['name'].upper()) or 
+                    text.get_text().startswith('Min:') or 
+                    text.get_text().startswith('Max:') or 
+                    text.get_text().startswith('Avg:')):
+                    texts_to_remove.append(text)
+                    break
+        
+        # Remove the collected texts
+        for text in texts_to_remove:
+            text.remove()
+    except Exception as e:
+        print(f"Error removing text elements: {e}")
     
     # Clear the box annotations list
     annotations = []
-    canvas.draw()
+    canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
     root.after(100, update_temperature_table)  # Update table after a short delay
 
 def on_window_resize(event=None):
@@ -642,7 +792,7 @@ def on_window_resize(event=None):
         if width > 1 and height > 1 and canvas_widget is not None:  # Check if canvas exists
             # Update the figure size to match the new frame size
             fig.set_size_inches(width/fig.dpi, height/fig.dpi)
-            canvas.draw()
+            canvas.draw_idle()
 
 def copy_to_clipboard():
     try:
@@ -656,6 +806,7 @@ def copy_to_clipboard():
         print(f"Error copying values: {e}")
 
 def export_current_view():
+    global export_path  # Add this line to use global variable
     try:
         # Get the current view's limits
         xlim = ax.get_xlim()
@@ -666,93 +817,99 @@ def export_current_view():
         export_ax = export_fig.add_subplot(111)
         
         # Copy the current image data
-        export_ax.imshow(img_display.get_array(), cmap=img_display.get_cmap(), 
+        export_img = export_ax.imshow(img_display.get_array(), cmap=img_display.get_cmap(), 
                         vmin=img_display.get_clim()[0], vmax=img_display.get_clim()[1])
         
-        # Copy all box annotations
+        # Add colorbar with height matching the image
+        divider = make_axes_locatable(export_ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        export_colorbar = export_fig.colorbar(export_img, cax=cax)
+        export_colorbar.ax.tick_params(labelsize=10)
+        
+        # Copy all box annotations (side labels and circles)
         for annotation in annotations:
-            # Copy rectangle
             rect = annotation['rect']
+            # Draw rectangle
             new_rect = Rectangle(rect.get_xy(), rect.get_width(), rect.get_height(),
-                               fill=False, edgecolor='white', linewidth=1)
-            new_rect.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+                               fill=False, edgecolor='white', linewidth=BOX_LINE_THICKNESS)
+            new_rect.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
             export_ax.add_patch(new_rect)
             
-            # Copy min/max circles if they exist
+            # Draw min/max circles if they exist
             if annotation.get('min_circle'):
                 min_circle = annotation['min_circle']
-                new_min_circle = plt.Circle(min_circle.center, min_circle.radius,
+                new_min_circle = plt.Circle(min_circle.center, CIRCLE_RADIUS,
                                           color='blue', fill=True)
-                new_min_circle.set_path_effects([plt_effects.withStroke(linewidth=1.5, foreground='black')])
+                new_min_circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
                 export_ax.add_patch(new_min_circle)
-                
-                # Copy min temperature label
-                min_text = export_ax.text(min_circle.center[0], min_circle.center[1] - 10,
-                                        f'Min: {annotation["min_temp"]:.1f}°C',
-                                        color='white', fontsize=7, ha='center', fontweight='bold')
-                min_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-            
             if annotation.get('max_circle'):
                 max_circle = annotation['max_circle']
-                new_max_circle = plt.Circle(max_circle.center, max_circle.radius,
+                new_max_circle = plt.Circle(max_circle.center, CIRCLE_RADIUS,
                                           color='red', fill=True)
-                new_max_circle.set_path_effects([plt_effects.withStroke(linewidth=1.5, foreground='black')])
+                new_max_circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
                 export_ax.add_patch(new_max_circle)
-                
-                # Copy max temperature label
-                max_text = export_ax.text(max_circle.center[0], max_circle.center[1] - 10,
-                                        f'Max: {annotation["max_temp"]:.1f}°C',
-                                        color='white', fontsize=7, ha='center', fontweight='bold')
-                max_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
             
-            # Copy name label
-            name_text = export_ax.text(rect.get_xy()[0], rect.get_xy()[1] - 22,
-                                     annotation['name'].upper(),
-                                     color='white', fontsize=8, ha='center', fontweight='bold')
-            name_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-            
-            # Copy average temperature label
+            # Draw side labels (name, min, avg, max) in the same order and position as in the view
+            x, y, width, height = annotation['coords']
+            label_x = x + width + 10
+            label_y = y
+            label_spacing = 13
+            # Name label at the top
+            name_text = export_ax.text(label_x, label_y, annotation['name'].upper(),
+                                 color='white', fontsize=TEXT_SIZE_MEDIUM, ha='left', fontweight='bold')
+            name_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            # Min
+            if annotation['min_temp'] is not None:
+                min_side_text = export_ax.text(label_x, label_y + label_spacing, f"Min: {annotation['min_temp']:.1f}°C",
+                                         color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                min_side_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            # Avg
             if annotation['avg_temp'] is not None:
-                avg_text = export_ax.text(rect.get_xy()[0], rect.get_xy()[1] - 15,
-                                        f'Avg: {annotation["avg_temp"]:.1f}°C',
-                                        color='white', fontsize=7, ha='center', fontweight='bold')
-                avg_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+                avg_text = export_ax.text(label_x, label_y + 2*label_spacing, f"Avg: {annotation['avg_temp']:.1f}°C",
+                                     color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                avg_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            # Max
+            if annotation['max_temp'] is not None:
+                max_side_text = export_ax.text(label_x, label_y + 3*label_spacing, f"Max: {annotation['max_temp']:.1f}°C",
+                                         color='white', fontsize=TEXT_SIZE_SMALL, ha='left', fontweight='bold')
+                max_side_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         
         # Copy all point annotations as crosshair/circle with gap at center
         for point_annotation in point_annotations:
             x, y = point_annotation['coords']
             # Draw transparent circle
-            circle = plt.Circle((x, y), radius=3, edgecolor='white', facecolor='none', linewidth=1, zorder=10)
-            circle.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+            circle = plt.Circle((x, y), radius=CIRCLE_RADIUS, edgecolor='white', facecolor='none', linewidth=LINE_THICKNESS, zorder=10)
+            circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
             export_ax.add_patch(circle)
             # Draw crosshair lines with gap at center
-            line_length = 7
-            gap = 5
-            h_line_left = export_ax.plot([x - line_length, x - gap], [y, y], color='white', linewidth=1, zorder=11)[0]
-            h_line_left.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-            h_line_right = export_ax.plot([x + gap, x + line_length], [y, y], color='white', linewidth=1, zorder=11)[0]
-            h_line_right.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-            v_line_top = export_ax.plot([x, x], [y - line_length, y - gap], color='white', linewidth=1, zorder=11)[0]
-            v_line_top.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
-            v_line_bottom = export_ax.plot([x, x], [y + gap, y + line_length], color='white', linewidth=1, zorder=11)[0]
-            v_line_bottom.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+            h_line_left = export_ax.plot([x - LINE_LENGTH, x - LINE_GAP], [y, y], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+            h_line_left.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            h_line_right = export_ax.plot([x + LINE_GAP, x + LINE_LENGTH], [y, y], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+            h_line_right.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            v_line_top = export_ax.plot([x, x], [y - LINE_LENGTH, y - LINE_GAP], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+            v_line_top.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
+            v_line_bottom = export_ax.plot([x, x], [y + LINE_GAP, y + LINE_LENGTH], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+            v_line_bottom.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
             # Copy temperature text
             temp_text = point_annotation['temp_text']
             new_temp_text = export_ax.text(x, y - 12,
-                                         temp_text.get_text(), color='white', fontsize=7,
+                                         temp_text.get_text(), color='white', fontsize=TEXT_SIZE_SMALL,
                                          ha='center', fontweight='bold')
-            new_temp_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+            new_temp_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
             # Copy name text
             name_text = point_annotation['name_text']
             new_name_text = export_ax.text(x, y - 20,
-                                         name_text.get_text(), color='white', fontsize=8,
+                                         name_text.get_text(), color='white', fontsize=TEXT_SIZE_MEDIUM,
                                          ha='center', fontweight='bold')
-            new_name_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+            new_name_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         
         # Set the same view limits
         export_ax.set_xlim(xlim)
         export_ax.set_ylim(ylim)
         export_ax.axis('off')
+        
+        # Adjust figure layout to accommodate colorbar
+        export_fig.subplots_adjust(left=0.1, right=0.85, top=1, bottom=0, wspace=0, hspace=0)
         
         # Get the current file name and create export name
         current_file = file_label.cget("text").split(": ")[-1]
@@ -765,11 +922,23 @@ def export_current_view():
         os.makedirs(export_path, exist_ok=True)
         
         # Full path for the export file
+        global full_export_path
         full_export_path = os.path.join(export_path, export_name)
         
         # Save the figure
         export_fig.savefig(full_export_path, bbox_inches='tight', dpi=300)
         plt.close(export_fig)
+        
+        # Print export information
+        print(f"\nExport Details:")
+        print(f"Original Image: {file_path}")
+        print(f"Export Path: {full_export_path}")
+        print(f"Defect Type: {defect_var.get()}")
+        print(f"Project: {project_var.get()}")
+        print(f"Owner: {owner_var.get()}")
+        print(f"Location: {location_var.get()}")
+        print(f"Radiation: {radiation_var.get()} W/m²")
+        print("-" * 40)
         
         # Show success message
         tk.messagebox.showinfo("Export Successful", f"Image exported as {export_name}")
@@ -781,11 +950,11 @@ def toggle_point_annotation_mode():
     global point_annotation_mode, annotation_mode
     point_annotation_mode = not point_annotation_mode
     if point_annotation_mode:
-        btn_point_annotate.config(text="📍 Point Mode (ON)")
+        btn_point_annotate.config(text="📍 Point Mode\n(ON)")
         annotation_mode = False  # Turn off box annotation mode
-        btn_annotate.config(text="✏️ Drawing Mode (OFF)")
+        btn_annotate.config(text="✏️ Drawing Mode\n(OFF)")
     else:
-        btn_point_annotate.config(text="📍 Point Mode (OFF)")
+        btn_point_annotate.config(text="📍 Point Mode\n(OFF)")
 
 def get_annotation_name(title, prompt):
     # Create a custom dialog window
@@ -842,7 +1011,7 @@ def get_annotation_name(title, prompt):
     return result[0]
 
 def add_point_annotation(x, y):
-    global point_annotations
+    global point_annotations, undo_stack
     if 0 <= x < thermal_data.shape[1] and 0 <= y < thermal_data.shape[0]:
         temp = thermal_data[int(y), int(x)]
         # Get point name from user using custom dialog
@@ -851,37 +1020,35 @@ def add_point_annotation(x, y):
             return
         
         # Draw crosshair-style point marker with larger gap at center
-        circle = plt.Circle((x, y), radius=3, edgecolor='white', facecolor='none', linewidth=1, zorder=10)
-        circle.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        circle = plt.Circle((x, y), radius=CIRCLE_RADIUS, edgecolor='white', facecolor='none', linewidth=LINE_THICKNESS, zorder=10)
+        circle.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         ax.add_patch(circle)
         
-        line_length = 7
-        gap = 5  # Larger gap for bigger hole
         # Horizontal left
-        h_line_left = ax.plot([x - line_length, x - gap], [y, y], color='white', linewidth=1, zorder=11)[0]
-        h_line_left.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        h_line_left = ax.plot([x - LINE_LENGTH, x - LINE_GAP], [y, y], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+        h_line_left.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         # Horizontal right
-        h_line_right = ax.plot([x + gap, x + line_length], [y, y], color='white', linewidth=1, zorder=11)[0]
-        h_line_right.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        h_line_right = ax.plot([x + LINE_GAP, x + LINE_LENGTH], [y, y], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+        h_line_right.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         # Vertical top
-        v_line_top = ax.plot([x, x], [y - line_length, y - gap], color='white', linewidth=1, zorder=11)[0]
-        v_line_top.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        v_line_top = ax.plot([x, x], [y - LINE_LENGTH, y - LINE_GAP], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+        v_line_top.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         # Vertical bottom
-        v_line_bottom = ax.plot([x, x], [y + gap, y + line_length], color='white', linewidth=1, zorder=11)[0]
-        v_line_bottom.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+        v_line_bottom = ax.plot([x, x], [y + LINE_GAP, y + LINE_LENGTH], color='white', linewidth=LINE_THICKNESS, zorder=11)[0]
+        v_line_bottom.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         
         # Add temperature label
         temp_text = ax.text(x, y - 12, f'{temp:.1f}°C', 
-                      color='white', fontsize=7, ha='center', fontweight='bold')
-        temp_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+                      color='white', fontsize=TEXT_SIZE_SMALL, ha='center', fontweight='bold')
+        temp_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         
         # Add name label
         name_text = ax.text(x, y - 20, name.upper(),
-                      color='white', fontsize=8, ha='center', fontweight='bold')
-        name_text.set_path_effects([plt_effects.withStroke(linewidth=2, foreground='black')])
+                      color='white', fontsize=TEXT_SIZE_MEDIUM, ha='center', fontweight='bold')
+        name_text.set_path_effects([plt_effects.withStroke(linewidth=STROKE_THICKNESS, foreground='black')])
         
         # Store annotation
-        point_annotations.append({
+        point_annotation = {
             'circle': circle,
             'h_line_left': h_line_left,
             'h_line_right': h_line_right,
@@ -892,8 +1059,16 @@ def add_point_annotation(x, y):
             'coords': (x, y),
             'temp': temp,
             'name': name
+        }
+        point_annotations.append(point_annotation)
+        
+        # Add to undo stack
+        undo_stack.append({
+            'type': 'point',
+            'annotation': point_annotation
         })
-        canvas.draw()
+        
+        canvas.draw_idle()
         root.after(100, update_temperature_table)  # Update table after a short delay
 
 def clear_point_annotations():
@@ -917,32 +1092,8 @@ def clear_point_annotations():
     
     # Clear the point annotations list
     point_annotations = []
-    canvas.draw()
+    canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
     root.after(100, update_temperature_table)  # Update table after a short delay
-
-def copy_temperature_data():
-    try:
-        clipboard_text = ""
-        
-        # Add point temperatures
-        for i, point in enumerate(point_annotations, 1):
-            clipboard_text += f"P{i}\tVALUE\t{point['temp']:.1f}\t\t\t\t\n"
-        
-        # Add box temperatures
-        for i, box in enumerate(annotations, 1):
-            clipboard_text += f"B{i}\tMIN\t{box['min_temp']:.1f}\t\t\t\t\n"
-            clipboard_text += f"B{i}\tAVERAGE\t{box['avg_temp']:.1f}\t\t\t\t\n"
-            clipboard_text += f"B{i}\tMAX\t{box['max_temp']:.1f}\t\t\t\t\n"
-        
-        # Copy to clipboard
-        root.clipboard_clear()
-        root.clipboard_append(clipboard_text)
-        
-        # Show success message
-        tk.messagebox.showinfo("Success", "Temperature data copied to clipboard!")
-        
-    except Exception as e:
-        tk.messagebox.showerror("Error", f"Failed to copy data: {str(e)}")
 
 def clamp_view():
     # Clamp the axes limits to the image bounds
@@ -961,11 +1112,164 @@ def clamp_view():
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 
+def clear_all_annotations():
+    global undo_stack, annotations, point_annotations
+    # Clear box annotations
+    clear_annotations()
+    # Clear point annotations
+    clear_point_annotations()
+    # Remove any remaining text or shapes that might be outside the image
+    for text in ax.texts[:]:
+        text.remove()
+    for patch in ax.patches[:]:
+        patch.remove()
+    for line in ax.lines[:]:
+        line.remove()
+    # Clear the undo stack
+    undo_stack.clear()
+    canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
+    root.after(100, update_temperature_table)  # Update table after a short delay
+
+def undo_last_annotation():
+    global undo_stack, annotations, point_annotations
+    
+    if not undo_stack:  # If stack is empty, nothing to undo
+        return
+        
+    last_action = undo_stack.pop()  # Get the last action from the stack
+    
+    if last_action['type'] == 'box':
+        annotation = last_action['annotation']
+        if annotation in annotations:
+            # Remove the box annotation
+            if annotation['rect']:
+                annotation['rect'].remove()
+            if annotation.get('min_circle'):
+                annotation['min_circle'].remove()
+            if annotation.get('max_circle'):
+                annotation['max_circle'].remove()
+            # Remove only the text elements associated with this specific box
+            texts_to_remove = []
+            for text in ax.texts:
+                text_content = text.get_text()
+                # Check if this text belongs to the current box being removed
+                if (text_content.startswith(annotation['name'].upper()) or
+                    (text_content.startswith('Min:') and text.get_position()[0] == annotation.get('min_circle', {}).center[0] if annotation.get('min_circle') else False) or
+                    (text_content.startswith('Max:') and text.get_position()[0] == annotation.get('max_circle', {}).center[0] if annotation.get('max_circle') else False) or
+                    (text_content.startswith('Avg:') and text.get_position()[0] == annotation['coords'][0])):
+                    texts_to_remove.append(text)
+            
+            # Remove the collected texts
+            for text in texts_to_remove:
+                text.remove()
+            
+            annotations.remove(annotation)
+            
+    elif last_action['type'] == 'point':
+        annotation = last_action['annotation']
+        if annotation in point_annotations:
+            # Remove the point annotation
+            if annotation.get('circle'):
+                annotation['circle'].remove()
+            if annotation.get('h_line_left'):
+                annotation['h_line_left'].remove()
+            if annotation.get('h_line_right'):
+                annotation['h_line_right'].remove()
+            if annotation.get('v_line_top'):
+                annotation['v_line_top'].remove()
+            if annotation.get('v_line_bottom'):
+                annotation['v_line_bottom'].remove()
+            if annotation.get('temp_text'):
+                annotation['temp_text'].remove()
+            if annotation.get('name_text'):
+                annotation['name_text'].remove()
+            point_annotations.remove(annotation)
+    
+    canvas.draw_idle()  # Use draw_idle instead of draw for smoother updates
+    root.after(100, update_temperature_table)  # Update table after a short delay
+
+def generate_pdf_report():
+    try:
+        # Export the current view first
+        export_current_view()
+        
+        # Get all required values from UI elements
+        project_name = project_var.get()
+        project_owner = owner_var.get()
+        location_text = location_var.get()
+        category_text = defect_var.get()
+        coord_text = gps_text.get("1.0", tk.END).strip()
+        image_taken = date_text.get("1.0", tk.END).strip()
+        radiation = radiation_var.get()
+        
+        # Check if any variable is empty
+        if not all([
+            project_name.strip(),
+            project_owner.strip(),
+            location_text.strip(),
+            category_text.strip(),
+            coord_text.strip(),
+            image_taken.strip(),
+            str(radiation).strip()
+        ]):
+            tk.messagebox.showwarning("Missing Data", "All fields must be filled in and radiation must be nonzero before generating the PDF report.")
+            return
+        
+        if float(radiation) > 1000.00:
+            tk.messagebox.showwarning("RADIATION CAN'T > 1000", "Please enter a value less than or equal to 1000.")
+            return
+        
+        # Use temperature values from the first box annotation
+        if not annotations:
+            tk.messagebox.showwarning("No Box Annotation", "Please create at least one box annotation to generate the PDF report.")
+            return
+        box = annotations[0]
+        temp_min = box['min_temp']
+        temp_avg = box['avg_temp']
+        temp_max = box['max_temp']
+        
+        # Call Gen_reportV2.generate_report with the exported image path
+        Gen_reportV2.generate_report(
+            thermal_path=file_path,
+            thermal_img_path=full_export_path,
+            project_name=project_name,
+            project_owner=project_owner,
+            location_text=location_text,
+            category_text=category_text,
+            coord_text=coord_text,
+            image_taken=image_taken,
+            temp_min=round(float(temp_min), 1),
+            temp_avg=round(float(temp_avg), 1),
+            temp_max=round(float(temp_max), 1),
+            radiation=round(float(radiation), 2)
+        )
+        
+        thermal_filename = os.path.splitext(os.path.basename(file_path))[0]
+        pdf_path = f"Report/{thermal_filename}_{location_text}.pdf"
+        # Show success message
+        tk.messagebox.showinfo("Success", f"{str(pdf_path)} report generated successfully!")
+        
+    except Exception as e:
+        print(e)
+        tk.messagebox.showerror("Error", f"Failed to generate PDF report: {str(e)}")
+
+# Add a function to refresh/restart the UI
+def refresh_ui():
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
 # Create Tkinter window
 root = tk.Tk()
-root.title("R-Tiff Viewer by KNP")
+root.title("GIM R-Tiff Tools by KNP")
 root.geometry("1300x900")  # Set initial window size
 root.protocol("WM_DELETE_WINDOW", on_closing) 
+
+# Create all Tkinter variables after root window creation
+project_var = tk.StringVar(root)
+owner_var = tk.StringVar(root)
+location_var = tk.StringVar(root)
+radiation_var = tk.StringVar(root)  # Add radiation variable
+defect_var = tk.StringVar(root, value="No Abnormality")
+cmap_var = tk.StringVar(root, value='magma')
 
 # Create main container with grid
 main_container = tk.Frame(root)
@@ -1015,9 +1319,39 @@ content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 frame = tk.Frame(content_frame)
 frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-# Control panel (right side)
-control_panel = ttkb.Frame(content_frame, padding=10)
-control_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+# --- Make the right-side control panel scrollable ---
+# Create a frame to hold the canvas and scrollbar
+scrollable_panel_frame = tk.Frame(content_frame, width=340, height=600)
+scrollable_panel_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0), expand=False)
+scrollable_panel_frame.pack_propagate(False)
+
+# Create a canvas and a vertical scrollbar for the control panel
+control_canvas = tk.Canvas(scrollable_panel_frame, borderwidth=0, highlightthickness=0, width=320)
+control_scrollbar = ttkb.Scrollbar(scrollable_panel_frame, orient="vertical", command=control_canvas.yview)
+control_canvas.configure(yscrollcommand=control_scrollbar.set)
+
+control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+control_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+# Create the actual control panel frame inside the canvas
+control_panel = ttkb.Frame(control_canvas, padding=10)
+control_panel_id = control_canvas.create_window((0, 0), window=control_panel, anchor="nw")
+
+# Function to resize the canvas scrollregion
+def on_control_panel_configure(event):
+    control_canvas.configure(scrollregion=control_canvas.bbox("all"))
+    # Make the control panel width match the canvas width (with a minimum width)
+    min_width = 320
+    current_width = max(control_canvas.winfo_width(), min_width)
+    control_canvas.itemconfig(control_panel_id, width=current_width)
+
+control_panel.bind("<Configure>", on_control_panel_configure)
+
+# Allow scrolling with mouse wheel
+control_panel.bind_all("<MouseWheel>", lambda event: control_canvas.yview_scroll(int(-1*(event.delta/120)), "units"))
+
+# Make sure the canvas expands with the window
+scrollable_panel_frame.pack_propagate(False)
 
 style = ttkb.Style()
 
@@ -1047,8 +1381,9 @@ vmax_value_label.bind('<Button-1>', on_max_temp_click)
 cmap_frame = tk.Frame(root)
 cmap_frame.pack(pady=10)
 
-cmap_var = tk.StringVar(value='inferno')
-cmap_options = ['inferno', 'jet', 'hot', 'gray', 'viridis', 'plasma', 'magma', 'cividis', 'nipy_spectral', 'turbo', 'prism']
+# Set default colormap to 'magma' everywhere
+cmap_options = ['magma', 'inferno', 'jet', 'hot', 'gray', 'viridis', 'plasma', 'cividis', 'nipy_spectral', 'turbo', 'prism']
+cmap_var = tk.StringVar(value='magma')
 
 # Create colormap selection dropdown
 ttkb.Label(control_panel, text="Colormap", font=("Arial", 10)).pack(anchor="w", pady=(15, 0))
@@ -1057,37 +1392,124 @@ cmap_dropdown = ttkb.Combobox(control_panel, textvariable=cmap_var,
 cmap_dropdown.pack(fill="x")
 cmap_dropdown.bind("<<ComboboxSelected>>", update_image)
 
+# Add after the colormap dropdown in the control panel section
+ttkb.Label(control_panel, text="Defect Type", font=("Arial", 10)).pack(anchor="w", pady=(15, 0))
+defect_dropdown = ttkb.Combobox(control_panel, textvariable=defect_var,
+                              values=defect_types, state='readonly', width=30)
+defect_dropdown.pack(fill="x", pady=(0, 5))
+
+def on_defect_select(event):
+    selected_defect = defect_var.get()
+    print(f"\nSelected Defect Type: {selected_defect}")
+    print("-" * 40)
+
+# Bind the selection event
+defect_dropdown.bind("<<ComboboxSelected>>", on_defect_select)
+
 # Reset Button
 btn_reset = ttkb.Button(control_panel, text="Reset View", command=reset_view)
 btn_reset.pack(pady=15)
 
-# Clear annotations button
-btn_clear = ttkb.Button(control_panel, text="🗑️ Clear Boxs", command=clear_annotations)
-btn_clear.pack(pady=5)
+# Create a frame for the 2x2 grid of clear and undo buttons
+clear_undo_frame = ttkb.Frame(control_panel)
+clear_undo_frame.pack(pady=5)
 
-# Annotation Button
-btn_annotate = ttkb.Button(control_panel, text="✏️ Drawing Mode (OFF)", command=toggle_annotation_mode)
-btn_annotate.pack(pady=15)
+# Set a fixed width for all buttons in the grid
+button_width = 15
+
+# Create the 2x2 grid of buttons
+btn_clear_boxes = ttkb.Button(clear_undo_frame, text="🗑️ Clear Boxes", command=clear_annotations, width=button_width)
+btn_clear_boxes.grid(row=0, column=0, padx=2, pady=2, sticky='ew')
+
+btn_clear_points = ttkb.Button(clear_undo_frame, text="🗑️ Clear Points", command=clear_point_annotations, width=button_width)
+btn_clear_points.grid(row=0, column=1, padx=2, pady=2, sticky='ew')
+
+btn_clear_all = ttkb.Button(clear_undo_frame, text="🗑️ Clear All", command=clear_all_annotations, width=button_width)
+btn_clear_all.grid(row=1, column=0, padx=2, pady=2, sticky='ew')
+
+btn_undo = ttkb.Button(clear_undo_frame, text="↩️ Undo", command=undo_last_annotation, width=button_width)
+btn_undo.grid(row=1, column=1, padx=2, pady=2, sticky='ew')
+
+# Configure grid columns to have equal width
+clear_undo_frame.grid_columnconfigure(0, weight=1)
+clear_undo_frame.grid_columnconfigure(1, weight=1)
+
+# Create a frame for the drawing mode buttons
+draw_mode_frame = ttkb.Frame(control_panel)
+draw_mode_frame.pack(pady=15)
+
+# Create the 1x2 grid of drawing mode buttons
+btn_annotate = ttkb.Button(draw_mode_frame, text="✏️ Box Mode\n(OFF)", command=toggle_annotation_mode, width=button_width)
+btn_annotate.grid(row=0, column=0, padx=2, pady=2, sticky='ew')
+
+btn_point_annotate = ttkb.Button(draw_mode_frame, text="📍 Point Mode\n(OFF)", command=toggle_point_annotation_mode, width=button_width)
+btn_point_annotate.grid(row=0, column=1, padx=2, pady=2, sticky='ew')
+
+# Configure grid columns to have equal width
+draw_mode_frame.grid_columnconfigure(0, weight=1)
+draw_mode_frame.grid_columnconfigure(1, weight=1)
 
 # Export button
 btn_export = ttkb.Button(control_panel, text="💾 Export View", command=export_current_view)
 btn_export.pack(pady=5)
 
-# Point annotation button
-btn_point_annotate = ttkb.Button(control_panel, text="📍 Point Mode (OFF)", command=toggle_point_annotation_mode)
-btn_point_annotate.pack(pady=5)
-
-# Clear points button
-btn_clear_points = ttkb.Button(control_panel, text="🗑️ Clear Points", command=clear_point_annotations)
-btn_clear_points.pack(pady=5)
-
 # Add this after creating the control panel
 table_frame = ttkb.Frame(control_panel)
 table_frame.pack(fill=tk.X, pady=10)
 
-# Add copy button for temperature data
-btn_copy_temp = ttkb.Button(control_panel, text="📋 Copy Temperature Data", command=copy_temperature_data)
-btn_copy_temp.pack(pady=5)
+# Add after the defect type dropdown in the control panel section
+# Project Information Frame
+project_frame = ttkb.LabelFrame(control_panel, text="Project Information", padding=10)
+project_frame.pack(fill="x", pady=(15, 5))
+
+# Project
+ttkb.Label(project_frame, text="Project:", font=("Arial", 10)).pack(anchor="w")
+project_entry = ttkb.Entry(project_frame, textvariable=project_var, width=30)
+project_entry.pack(fill="x", pady=(0, 5))
+
+# Owner
+ttkb.Label(project_frame, text="Owner:", font=("Arial", 10)).pack(anchor="w")
+owner_entry = ttkb.Entry(project_frame, textvariable=owner_var, width=30)
+owner_entry.pack(fill="x", pady=(0, 5))
+
+# Location
+ttkb.Label(project_frame, text="Location:", font=("Arial", 10)).pack(anchor="w")
+location_entry = ttkb.Entry(project_frame, textvariable=location_var, width=30)
+location_entry.pack(fill="x", pady=(0, 5))
+
+# Radiation
+ttkb.Label(project_frame, text="Radiation (W/m²):", font=("Arial", 10)).pack(anchor="w")
+radiation_entry = ttkb.Entry(project_frame, textvariable=radiation_var, width=30)
+radiation_entry.pack(fill="x", pady=(0, 5))
+
+# Add after the radiation entry in the project frame
+btn_pdf = ttkb.Button(control_panel, text="📄 Generate PDF Report", command=generate_pdf_report)
+btn_pdf.pack(pady=5)
+
+# Add a refresh/restart button
+btn_refresh = ttkb.Button(top_frame, text="🔄 Refresh UI", command=refresh_ui)
+btn_refresh.pack(side=tk.LEFT, padx=5)
+
+# Modify the dynamic button sizing function
+def update_button_sizes(event=None):
+    # Get the current width of the window
+    window_width = root.winfo_width()
+    
+    # Calculate button width as 1/4 of window width (in characters, roughly 8 pixels per character)
+    button_width = max(15, min(int(window_width / 4 / 8), 30))  # Min 15, max 30 characters
+    
+    # Update button widths
+    for button in [btn_open, btn_reset, btn_export, btn_pdf, btn_clear_boxes, 
+                  btn_clear_points, btn_clear_all, btn_undo, btn_annotate, 
+                  btn_point_annotate]:
+        button.configure(width=button_width)
+
+# Bind the resize event to the root window instead of control panel
+root.bind('<Configure>', update_button_sizes)
+
+# Update button sizes initially
+root.update_idletasks()
+update_button_sizes()
 
 # Run the application
 root.mainloop()
